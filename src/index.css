@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-hospital-primary: #0284c7;
+  --color-hospital-accent: #0ea5e9;
+  --color-hospital-bg: #f8fafc;
+  --color-hospital-text: #1e293b;
+  --color-hospital-border: #e2e8f0;
+}
+
+@layer base {
+  body {
+    @apply bg-hospital-bg text-hospital-text font-sans;
+  }
+}

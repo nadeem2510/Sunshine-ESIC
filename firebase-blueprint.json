@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Patient": {
+      "title": "Patient Record",
+      "description": "Record of an ESIC patient admission and processing status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "mobileNo": { "type": "string", "pattern": "^[0-9]{10}$" },
+        "dispensary": { "type": "string", "enum": ["Waluj", "Paithan", "Chikalthana", "CIDCO", "Other"] },
+        "dateOfAdmission": { "type": "string", "format": "date-time" },
+        "approvalStatus": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
+        "daysApproved": { "type": "number" },
+        "extensionDate": { "type": "string", "format": "date-time" },
+        "reApprovalNeeded": { "type": "boolean" },
+        "fileStatus": { "type": "string", "enum": ["Initial Stage", "Documentation Pending", "File Completed", "Final Submission to ESIC"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "mobileNo", "dispensary", "dateOfAdmission", "approvalStatus", "fileStatus"]
+    },
+    "Staff": {
+      "title": "Hospital Staff",
+      "description": "Authorized staff members with system access levels",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "staff"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "patients": {
+      "schema": "Patient",
+      "description": "Collection of all patient records"
+    },
+    "staff": {
+      "schema": "Staff",
+      "description": "Collection of authorized hospital staff"
+    }
+  }
+}

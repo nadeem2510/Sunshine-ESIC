@@ -1,0 +1,6 @@
+{
+  "name": "Sunshine Hospital ESIC Tracker",
+  "description": "Internal hospital management dashboard for tracking ESIC patient admissions, approvals, and file processing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

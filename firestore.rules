@@ -1,0 +1,79 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'nadeem2510@gmail.com' ||
+        get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.role == 'admin'
+      );
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Patient Validation helper
+    function isValidPatient(data) {
+      return data.keys().hasAll(['name', 'mobileNo', 'dispensary', 'dateOfAdmission', 'approvalStatus', 'fileStatus', 'createdAt', 'updatedAt'])
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+        && data.mobileNo is string && data.mobileNo.matches('^[0-9]{10}$')
+        && data.dispensary in ['Waluj', 'Paithan', 'Chikalthana', 'CIDCO', 'Other']
+        && data.approvalStatus in ['Pending', 'Approved', 'Rejected']
+        && data.fileStatus in ['Initial Stage', 'Documentation Pending', 'File Completed', 'Final Submission to ESIC']
+        && data.dateOfAdmission is string // ISO format
+        && (data.daysApproved is number || data.daysApproved == null)
+        && data.extensionDate is string
+        && data.reApprovalNeeded is bool
+        && data.createdAt == (resource == null ? request.time : resource.data.createdAt)
+        && data.updatedAt == request.time;
+    }
+
+    match /patients/{patientId} {
+      // Internal app: allow authenticated hospital staff (any signed-in user for this demo/base)
+      // In production, we'd limit this to specific domains or an admin-maintained list
+      allow read: if isSignedIn();
+      
+      allow create: if isSignedIn() 
+        && isValidPatient(incoming())
+        && isValidId(patientId);
+        
+      allow update: if isSignedIn()
+        && isValidPatient(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'mobileNo', 'dispensary', 'dateOfAdmission', 
+          'approvalStatus', 'daysApproved', 'extensionDate', 
+          'reApprovalNeeded', 'fileStatus', 'updatedAt'
+        ]);
+        
+      allow delete: if isSignedIn(); // Allow deletion for demo/internal cleanup
+    }
+
+    match /staff/{staffId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+  }
+}
