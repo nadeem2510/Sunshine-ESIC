@@ -8,12 +8,23 @@
         "id": { "type": "string" },
         "name": { "type": "string" },
         "mobileNo": { "type": "string", "pattern": "^[0-9]{10}$" },
-        "dispensary": { "type": "string", "enum": ["Waluj", "Paithan", "Chikalthana", "CIDCO", "Other"] },
+        "dispensary": { "type": "string", "enum": ["Waluj", "Waluj DCBO", "Paithan"] },
         "dateOfAdmission": { "type": "string", "format": "date-time" },
         "approvalStatus": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
         "daysApproved": { "type": "number" },
         "extensionDate": { "type": "string", "format": "date-time" },
         "reApprovalNeeded": { "type": "boolean" },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "additionalDays": { "type": "number" },
+              "reason": { "type": "string" },
+              "createdAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        },
         "fileStatus": { "type": "string", "enum": ["Initial Stage", "Documentation Pending", "File Completed", "Final Submission to ESIC"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

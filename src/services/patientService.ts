@@ -8,10 +8,11 @@ import {
   query, 
   orderBy, 
   serverTimestamp,
+  arrayUnion,
   type Unsubscribe
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
-import { PatientRecord } from '../types';
+import { PatientRecord, PatientExtension } from '../types';
 import { handleFirestoreError } from '../lib/utils';
 
 const COLLECTION_NAME = 'patients';
@@ -80,6 +81,45 @@ export const patientService = {
       await deleteDoc(patientRef);
     } catch (error) {
       handleFirestoreError(error, 'delete', `${COLLECTION_NAME}/${id}`, auth);
+    }
+  },
+
+  /**
+   * Add an extension to an existing patient
+   */
+  addExtension: async (id: string, extension: Omit<PatientExtension, 'createdAt'>, newExtensionDate: string) => {
+    try {
+      const patientRef = doc(db, COLLECTION_NAME, id);
+      await updateDoc(patientRef, {
+        extensions: arrayUnion({
+          ...extension,
+          createdAt: new Date().toISOString()
+        }),
+        extensionDate: newExtensionDate,
+        reApprovalNeeded: true,
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      handleFirestoreError(error, 'update', `${COLLECTION_NAME}/${id}`, auth);
+    }
+  },
+
+  /**
+   * Discharge a patient
+   */
+  dischargePatient: async (id: string, reason: string) => {
+    try {
+      const patientRef = doc(db, COLLECTION_NAME, id);
+      await updateDoc(patientRef, {
+        approvalStatus: 'Discharged',
+        isDischarged: true,
+        dischargedAt: new Date().toISOString(),
+        dischargeReason: reason,
+        reApprovalNeeded: false,
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      handleFirestoreError(error, 'update', `${COLLECTION_NAME}/${id}`, auth);
     }
   }
 };

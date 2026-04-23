@@ -32,6 +32,7 @@ export const pdfService = {
     const tableData = patients.map((p, index) => [
       index + 1,
       p.name,
+      p.category,
       p.dispensary,
       format(new Date(p.dateOfAdmission), 'dd/MM/yy'),
       p.approvalStatus,
@@ -43,7 +44,7 @@ export const pdfService = {
 
     (doc as any).autoTable({
       startY: 35,
-      head: [['#', 'Patient Name', 'Dispensary', 'DOA', 'Approval', 'Days', 'Ext. Date', 'Re-Appr.', 'File Status']],
+      head: [['#', 'Patient Name', 'Category', 'Dispensary', 'DOA', 'Approval', 'Days', 'Ext. Date', 'Re-Appr.', 'File Status']],
       body: tableData,
       theme: 'grid',
       headStyles: { fillColor: [40, 40, 40], textColor: [255, 255, 255] },
@@ -95,6 +96,7 @@ export const pdfService = {
     const details = [
       ['Patient Name:', patient.name],
       ['Mobile Number:', patient.mobileNo],
+      ['Treatment Category:', patient.category],
       ['ESIC Dispensary:', patient.dispensary],
       ['Date of Admission:', format(new Date(patient.dateOfAdmission), 'dd MMMM yyyy')],
       ['Approval Status:', patient.approvalStatus],

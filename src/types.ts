@@ -2,7 +2,9 @@
  * ESIC Patient Record Data Model
  */
 
-export type ApprovalStatus = 'Pending' | 'Approved' | 'Rejected';
+export type ApprovalStatus = 'Pending' | 'Approved' | 'Rejected' | 'Discharged';
+
+export type PatientCategory = 'Surgical' | 'Medical Management' | 'Maternity' | 'Other';
 
 export type FileStatus = 
   | 'Initial Stage' 
@@ -10,18 +12,29 @@ export type FileStatus =
   | 'File Completed' 
   | 'Final Submission to ESIC';
 
-export type Dispensary = 'Waluj' | 'Paithan' | 'Chikalthana' | 'CIDCO' | 'Other';
+export type Dispensary = 'Waluj' | 'Waluj DCBO' | 'Paithan';
+
+export interface PatientExtension {
+  additionalDays: number;
+  reason: string;
+  createdAt: string;
+}
 
 export interface PatientRecord {
   id: string;
   name: string;
   mobileNo: string; // 10 digits
+  category: PatientCategory;
   dispensary: Dispensary;
   dateOfAdmission: string; // ISO string
   approvalStatus: ApprovalStatus;
   daysApproved: number;
   extensionDate: string; // ISO string, auto-calculated but editable
   reApprovalNeeded: boolean;
+  extensions?: PatientExtension[];
+  isDischarged?: boolean;
+  dischargedAt?: string;
+  dischargeReason?: string;
   fileStatus: FileStatus;
   createdAt: string;
   updatedAt: string;

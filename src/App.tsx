@@ -15,6 +15,7 @@ import {
   CheckCircle2, 
   MoreVertical,
   FileText,
+  FileSpreadsheet,
   User,
   Calendar,
   Phone,
@@ -25,18 +26,23 @@ import {
   ShieldCheck,
   ChevronLeft,
   Trash2,
-  X
+  X,
+  CalendarDays,
+  History,
+  FileBadge,
+  LogOut
 } from 'lucide-react';
-import { format, addDays, differenceInDays } from 'date-fns';
+import { format, addDays, differenceInDays, isWithinInterval, startOfDay, endOfDay } from 'date-fns';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, type User as FirebaseUser } from 'firebase/auth';
 import { auth } from './services/firebase';
 import { patientService } from './services/patientService';
 import { staffService } from './services/staffService';
-import { PatientRecord, ApprovalStatus, FileStatus, Dispensary, Staff, StaffRole } from './types';
+import { PatientRecord, ApprovalStatus, FileStatus, Dispensary, Staff, StaffRole, PatientExtension } from './types';
 import { pdfService } from './services/pdfService';
+import { excelService } from './services/excelService';
 import { cn } from './lib/utils';
 
-type AppView = 'dashboard' | 'admin';
+type AppView = 'dashboard' | 'admin' | 'extended';
 
 export default function App() {
   const [patients, setPatients] = React.useState<PatientRecord[]>([]);
@@ -47,6 +53,16 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [sortBy, setSortBy] = useState<'extensionDate' | 'approvalStatus'>('extensionDate');
   const [currentView, setCurrentView] = useState<AppView>('dashboard');
+  
+  // Advanced Filters
+  const [filterDispensary, setFilterDispensary] = useState<Dispensary | 'All'>('All');
+  const [filterStartDate, setFilterStartDate] = useState<string>('');
+  const [filterEndDate, setFilterEndDate] = useState<string>('');
+
+  // Local Action States
+  const [selectedPatient, setSelectedPatient] = useState<PatientRecord | null>(null);
+  const [isStatusActionSheetOpen, setIsStatusActionSheetOpen] = useState(false);
+  const [isExtensionModalOpen, setIsExtensionModalOpen] = useState(false);
 
   // Auth Subscription
   React.useEffect(() => {
@@ -93,28 +109,59 @@ export default function App() {
 
   const filteredPatients = useMemo(() => {
     return patients
-      .filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()) || p.mobileNo.includes(searchTerm))
+      .filter(p => {
+        // Search Filter
+        const matchesSearch = p.name.toLowerCase().includes(searchTerm.toLowerCase()) || p.mobileNo.includes(searchTerm);
+        
+        // Dispensary Filter
+        const matchesDispensary = filterDispensary === 'All' || p.dispensary === filterDispensary;
+        
+        // Date Range Filter
+        let matchesDate = true;
+        if (filterStartDate || filterEndDate) {
+          const doa = new Date(p.dateOfAdmission);
+          const start = filterStartDate ? startOfDay(new Date(filterStartDate)) : new Date(0);
+          const end = filterEndDate ? endOfDay(new Date(filterEndDate)) : new Date(8640000000000000);
+          matchesDate = isWithinInterval(doa, { start, end });
+        }
+
+        // View Filter (Dashboard vs Extended)
+        const isNotDischarged = p.approvalStatus !== 'Discharged';
+        const matchesView = currentView === 'extended' 
+          ? (isNotDischarged && p.extensions && p.extensions.length > 0) 
+          : (currentView === 'dashboard' ? isNotDischarged : true);
+
+        return matchesSearch && matchesDispensary && matchesDate && matchesView;
+      })
       .sort((a, b) => {
         if (sortBy === 'extensionDate') {
           return new Date(a.extensionDate).getTime() - new Date(b.extensionDate).getTime();
         }
         return a.approvalStatus.localeCompare(b.approvalStatus);
       });
-  }, [patients, searchTerm, sortBy]);
+  }, [patients, searchTerm, sortBy, filterDispensary, filterStartDate, filterEndDate, currentView]);
 
-  const stats = useMemo(() => ({
-    active: patients.length,
-    pending: patients.filter(p => p.approvalStatus === 'Pending').length,
-    extensionToday: patients.filter(p => {
-      const today = format(new Date(), 'yyyy-MM-dd');
-      const ext = format(new Date(p.extensionDate), 'yyyy-MM-dd');
-      return ext === today;
-    }).length,
-    total: patients.length,
-  }), [patients]);
+  const stats = useMemo(() => {
+    const activePatients = patients.filter(p => p.approvalStatus !== 'Discharged');
+    return {
+      active: activePatients.length,
+      pending: patients.filter(p => p.approvalStatus === 'Pending').length,
+      extensionToday: activePatients.filter(p => {
+        const today = format(new Date(), 'yyyy-MM-dd');
+        const ext = format(new Date(p.extensionDate), 'yyyy-MM-dd');
+        return ext === today;
+      }).length,
+      total: patients.length,
+      discharged: patients.filter(p => p.approvalStatus === 'Discharged').length
+    };
+  }, [patients]);
 
   const handlePrintDaily = () => {
     pdfService.generateDashboardReport(filteredPatients);
+  };
+
+  const handleExportExcel = () => {
+    excelService.exportPatientsToExcel(filteredPatients, `Sunshine_Hospital_Records_${currentView}`);
   };
 
   const handlePrintPatient = (p: PatientRecord) => {
@@ -123,6 +170,26 @@ export default function App() {
 
   const handleSavePatient = async (data: Omit<PatientRecord, 'id' | 'createdAt' | 'updatedAt'>) => {
     await patientService.addPatient(data);
+  };
+
+  const handleUpdateStatus = async (status: ApprovalStatus) => {
+    if (selectedPatient) {
+      await patientService.updatePatient(selectedPatient.id, { approvalStatus: status, reApprovalNeeded: status === 'Approved' ? false : selectedPatient.reApprovalNeeded });
+      setIsStatusActionSheetOpen(false);
+      setSelectedPatient(null);
+    }
+  };
+
+  const handleCaseResolution = async (type: 'extension' | 'discharge', data: any) => {
+    if (selectedPatient) {
+      if (type === 'extension') {
+        await patientService.addExtension(selectedPatient.id, data.extension, data.newDate);
+      } else {
+        await patientService.dischargePatient(selectedPatient.id, data.reason);
+      }
+      setIsExtensionModalOpen(false);
+      setSelectedPatient(null);
+    }
   };
 
   if (loading) {
@@ -166,92 +233,179 @@ export default function App() {
   return (
     <div className="min-h-screen bg-hospital-bg font-sans text-hospital-text flex flex-col h-screen overflow-hidden">
       {/* Header */}
-      <header className="bg-white border-b border-hospital-border h-[70px] px-6 flex items-center justify-between flex-shrink-0 z-10 transition-all">
-        <div className="flex items-center gap-3">
-          <div className="bg-hospital-primary w-10 h-10 rounded-lg flex items-center justify-center text-white font-bold text-lg shadow-sm">
-            SH
-          </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-tight text-slate-950 leading-none">Sunshine Hospital</h1>
-            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mt-0.5">ESIC Patient Management System</p>
-          </div>
-        </div>
+      <header className="bg-white border-b border-hospital-border flex-shrink-0 z-20 shadow-sm">
+        {/* Top Level: Logo & Nav & Profile */}
+        <div className="h-[64px] px-6 flex items-center justify-between border-b border-slate-50">
+          <div className="flex items-center gap-8">
+            <div className="flex items-center gap-3">
+              <div className="bg-hospital-primary w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold text-lg shadow-sm">
+                SH
+              </div>
+              <div className="hidden sm:block">
+                <h1 className="text-base font-bold tracking-tight text-slate-950 leading-none">Sunshine Hospital</h1>
+                <p className="text-[9px] font-semibold text-slate-400 uppercase tracking-wider mt-0.5">ESIC Management</p>
+              </div>
+            </div>
 
-        <div className="text-sm font-medium text-slate-500 hidden md:block">
-          {format(new Date(), 'EEEE, MMM dd, yyyy')}
-        </div>
-
-        <div className="flex items-center gap-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input 
-              type="text" 
-              placeholder="Quick search..."
-              className="pl-9 pr-4 py-1.5 bg-slate-50 border border-hospital-border rounded-lg w-48 lg:w-64 text-sm focus:ring-2 focus:ring-hospital-primary/10 outline-none transition-all placeholder:text-slate-300"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-          </div>
-          
-          <div className="flex gap-2">
-            {isAdmin && (
+            <nav className="flex items-center gap-1 bg-slate-100/50 p-1 rounded-xl border border-slate-100">
               <button 
-                onClick={() => setCurrentView(currentView === 'dashboard' ? 'admin' : 'dashboard')}
+                onClick={() => setCurrentView('dashboard')}
                 className={cn(
-                  "flex items-center gap-2 px-3 py-2 border rounded-md text-xs font-semibold transition-all",
-                  currentView === 'admin' 
-                    ? "bg-slate-900 text-white border-slate-900 shadow-lg shadow-slate-200" 
-                    : "border-hospital-border text-slate-600 hover:bg-slate-50"
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  currentView === 'dashboard' ? "bg-white text-hospital-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
                 )}
               >
-                <Settings size={14} />
-                {currentView === 'admin' ? 'Exit Admin' : 'Admin Panel'}
+                Dashboard
               </button>
-            )}
+              <button 
+                onClick={() => setCurrentView('extended')}
+                className={cn(
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  currentView === 'extended' ? "bg-white text-hospital-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                )}
+              >
+                <FileBadge size={14} />
+                Extended Approvals
+              </button>
+              {isAdmin && (
+                <button 
+                  onClick={() => setCurrentView('admin')}
+                  className={cn(
+                    "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                    currentView === 'admin' ? "bg-slate-900 text-white shadow-sm" : "text-slate-400 hover:text-slate-600"
+                  )}
+                >
+                  <Settings size={14} />
+                  Admin
+                </button>
+              )}
+            </nav>
+          </div>
 
-            <button 
-              onClick={handlePrintDaily}
-              className="flex items-center gap-2 px-3 py-2 border border-hospital-border text-slate-600 rounded-md text-xs font-semibold hover:bg-slate-50 transition-colors"
-            >
-              <Printer size={14} />
-              Print Daily
-            </button>
-
+          <div className="flex items-center gap-4">
+            <div className="hidden md:block text-right mr-2">
+              <div className="text-[11px] font-bold text-slate-900 leading-none">{user.displayName}</div>
+              <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">{isAdmin ? 'Administrator' : 'Staff Member'}</p>
+            </div>
+            
             <button 
               onClick={() => setIsModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-hospital-primary text-white rounded-md text-xs font-semibold hover:bg-hospital-accent transition-all active:scale-95 shadow-sm shadow-sky-100"
+              className="hidden sm:flex items-center gap-2 px-4 py-2 bg-hospital-primary text-white rounded-lg text-xs font-bold hover:bg-hospital-accent transition-all active:scale-95 shadow-lg shadow-sky-100"
             >
-              <Plus size={14} />
-              Add Patient
+              <Plus size={16} />
+              New Patient
             </button>
-          </div>
 
-          <div className="h-6 w-[1px] bg-hospital-border mx-1" />
+            <div className="h-8 w-[1px] bg-slate-100 mx-2" />
 
-          <div className="flex items-center gap-3">
-            <div className="text-right hidden xl:block">
-              <div className="text-[11px] font-bold text-slate-900 leading-none">{user.displayName}</div>
+            <div className="flex items-center gap-3">
               <button 
                 onClick={handleLogout}
-                className="text-[9px] font-bold text-slate-400 hover:text-rose-600 transition-colors uppercase tracking-widest mt-0.5 leading-none"
+                className="group relative"
               >
-                Sign Out
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt="Profile" className="w-9 h-9 rounded-xl border border-slate-200 object-cover group-hover:border-rose-200 transition-colors" />
+                ) : (
+                  <div className="w-9 h-9 rounded-xl bg-slate-50 flex items-center justify-center text-slate-400 text-xs font-bold border border-slate-200 group-hover:border-rose-200 transition-colors">
+                    {user.displayName?.[0] || 'U'}
+                  </div>
+                )}
+                <div className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 border-2 border-white rounded-full" />
               </button>
             </div>
-            {user.photoURL ? (
-              <img src={user.photoURL} alt="Profile" className="w-8 h-8 rounded-lg border border-hospital-border object-cover" />
-            ) : (
-              <div className="w-8 h-8 rounded-lg bg-slate-50 flex items-center justify-center text-slate-400 text-[10px] font-bold border border-hospital-border">
-                {user.displayName?.[0] || 'U'}
-              </div>
-            )}
           </div>
         </div>
+
+        {/* Lower Level: Filters (Visible everywhere except Admin unless needed) */}
+        {currentView !== 'admin' && (
+          <div className="h-[52px] px-6 bg-slate-50/50 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm focus-within:ring-2 focus-within:ring-hospital-primary/10 transition-all">
+                <Search size={14} className="text-slate-400" />
+                <input 
+                  type="text" 
+                  placeholder="Search name or phone..."
+                  className="bg-transparent border-none w-48 text-xs font-medium focus:ring-0 outline-none placeholder:text-slate-400"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+              </div>
+
+              <div className="h-6 w-[1px] bg-slate-200" />
+
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
+                <Hospital size={14} className="text-slate-400" />
+                <select 
+                  value={filterDispensary}
+                  onChange={(e) => setFilterDispensary(e.target.value as any)}
+                  className="bg-transparent border-none text-xs font-bold text-slate-600 focus:ring-0 cursor-pointer p-0 pr-6"
+                >
+                  <option value="All">All Dispensaries</option>
+                  <option value="Waluj">Waluj</option>
+                  <option value="Waluj DCBO">Waluj DCBO</option>
+                  <option value="Paithan">Paithan</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm ml-2">
+                <CalendarDays size={14} className="text-slate-400" />
+                <div className="flex items-center gap-2">
+                  <input 
+                    type="date"
+                    value={filterStartDate}
+                    onChange={(e) => setFilterStartDate(e.target.value)}
+                    className="bg-transparent border-none text-[10px] font-bold text-slate-600 focus:ring-0 p-0 w-24"
+                  />
+                  <span className="text-slate-300 text-[10px] font-bold uppercase tracking-tighter">to</span>
+                  <input 
+                    type="date"
+                    value={filterEndDate}
+                    onChange={(e) => setFilterEndDate(e.target.value)}
+                    className="bg-transparent border-none text-[10px] font-bold text-slate-600 focus:ring-0 p-0 w-24"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest hidden lg:block mr-2">
+                {format(new Date(), 'MMM dd, yyyy')}
+              </div>
+              <button 
+                onClick={handlePrintDaily}
+                className="flex items-center gap-2 px-3 py-1.5 border border-slate-200 text-slate-600 rounded-lg text-xs font-bold hover:bg-white hover:border-slate-300 transition-all active:scale-95 shadow-sm bg-white/50"
+              >
+                <Printer size={14} />
+                Print Reports
+              </button>
+
+              {isAdmin && (
+                <button 
+                  onClick={handleExportExcel}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold hover:bg-emerald-700 transition-all active:scale-95 shadow-sm shadow-emerald-100"
+                >
+                  <FileSpreadsheet size={14} />
+                  Export Excel
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Main Content */}
       <AnimatePresence mode="wait">
-        {currentView === 'dashboard' ? (
+        {currentView === 'admin' ? (
+          <motion.main
+            key="admin"
+            initial={{ opacity: 0, x: 10 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -10 }}
+            className="flex-1 p-6 overflow-auto"
+          >
+            <AdminPanel staff={staff} patients={patients} />
+          </motion.main>
+        ) : (
           <motion.main 
             key="dashboard"
             initial={{ opacity: 0, x: -10 }}
@@ -264,7 +418,9 @@ export default function App() {
               {/* Stats Row */}
               <section className="grid grid-cols-4 gap-6 flex-shrink-0">
                 <div className="bg-white p-5 rounded-xl border border-hospital-border shadow-sm">
-                  <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400 mb-1">Active Admissions</div>
+                  <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400 mb-1">
+                    {currentView === 'extended' ? 'Extended Cases' : 'Active Admissions'}
+                  </div>
                   <div className="text-2xl font-bold text-slate-900">{stats.active}</div>
                 </div>
                 <div className="bg-white p-5 rounded-xl border border-hospital-border shadow-sm">
@@ -276,8 +432,8 @@ export default function App() {
                   <div className="text-2xl font-bold text-rose-600">{stats.extensionToday}</div>
                 </div>
                 <div className="bg-white p-5 rounded-xl border border-hospital-border shadow-sm">
-                  <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400 mb-1">Total ESIC Files</div>
-                  <div className="text-2xl font-bold text-slate-900">{stats.total}</div>
+                  <div className="text-[10px] uppercase tracking-widest font-bold text-slate-400 mb-1">Total Discharged</div>
+                  <div className="text-2xl font-bold text-slate-500">{stats.discharged}</div>
                 </div>
               </section>
 
@@ -285,81 +441,123 @@ export default function App() {
               <div className="bg-white rounded-xl border border-hospital-border shadow-sm overflow-hidden flex flex-col flex-1 min-h-0">
                 <div className="overflow-auto flex-1 text-xs">
                   <table className="w-full text-left border-collapse table-fixed">
-                    <thead>
-                      <tr className="sticky top-0 z-10">
-                        <th className="w-[20%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Patient Name</th>
-                        <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Mobile</th>
-                        <th className="w-[15%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Dispensary</th>
-                        <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">DOA</th>
-                        <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Approval</th>
-                        <th className="w-[8%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-center">Days</th>
-                        <th className="w-[13%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Exp. Ext Date</th>
-                        <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-50">
-                      <AnimatePresence mode="popLayout">
-                        {filteredPatients.map((patient) => (
+                <thead>
+                  <tr className="sticky top-0 z-10">
+                    <th className="w-[15%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Patient Name</th>
+                    <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Mobile</th>
+                    <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Category</th>
+                    <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Dispensary</th>
+                    <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">DOA</th>
+                    <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Status</th>
+                    {currentView === 'extended' ? (
+                      <th className="w-[15%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-center">History</th>
+                    ) : (
+                      <th className="w-[8%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-center">Days</th>
+                    )}
+                    <th className="w-[13%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Exp. Date</th>
+                    <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  <AnimatePresence mode="popLayout">
+                      {filteredPatients.map((patient) => {
+                        const isDueToday = format(new Date(patient.extensionDate), 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
+                        
+                        return (
                           <motion.tr 
                             layout
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             key={patient.id}
+                            onClick={() => {
+                              setSelectedPatient(patient);
+                              setIsStatusActionSheetOpen(true);
+                            }}
                             className={cn(
-                              "group transition-colors",
-                              patient.reApprovalNeeded ? "bg-rose-50/50" : "hover:bg-slate-50/30"
+                              "group transition-colors cursor-pointer",
+                              patient.reApprovalNeeded 
+                                ? "bg-rose-50/50 hover:bg-rose-100/50 underline-offset-4 decoration-rose-200" 
+                                : isDueToday 
+                                  ? "bg-amber-50/70 hover:bg-amber-100/70 border-l-4 border-l-amber-400" 
+                                  : "hover:bg-slate-50/30"
                             )}
                           >
-                            <td className="px-4 py-3 whitespace-nowrap">
-                              <div className="flex items-center gap-2">
-                                {patient.reApprovalNeeded && <div className="w-2 h-2 rounded-full bg-rose-500 flex-shrink-0 animate-pulse" />}
-                                <span className="font-bold text-slate-900 truncate tracking-tight">{patient.name}</span>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5">
+                            {patient.reApprovalNeeded && <div className="w-1.5 h-1.5 rounded-full bg-rose-500 flex-shrink-0 animate-pulse" />}
+                            <span className="font-bold text-slate-900 truncate tracking-tight">{patient.name}</span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-[12px] text-slate-600 font-medium tabular-nums">
+                          {patient.mobileNo}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="text-[10px] font-bold text-hospital-primary px-2 py-0.5 bg-sky-50 rounded tracking-tight">
+                            {patient.category}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="text-[10px] font-bold text-slate-500 px-2 py-0.5 bg-slate-100 rounded tracking-tight">
+                            {patient.dispensary}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-[12px] text-slate-500 whitespace-nowrap tabular-nums">
+                          {format(new Date(patient.dateOfAdmission), 'dd MMM yy')}
+                        </td>
+                        <td className="px-4 py-3">
+                          <StatusPill status={patient.approvalStatus} />
+                        </td>
+                        {currentView === 'extended' ? (
+                          <td className="px-4 py-3 text-center">
+                            <div className="flex flex-col gap-0.5 items-center">
+                              <span className="text-[9px] font-bold text-slate-400">Total Ext: {patient.extensions?.length || 0}</span>
+                              <div className="flex gap-0.5 max-w-[80px] overflow-hidden">
+                                {patient.extensions?.map((_, i) => (
+                                  <div key={i} className="w-1 h-3 rounded-full bg-hospital-primary opacity-40 shrink-0" />
+                                ))}
                               </div>
-                            </td>
-                            <td className="px-4 py-3 text-[13px] text-slate-600 font-medium tabular-nums">
-                              {patient.mobileNo}
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="text-[11px] font-bold text-slate-500 px-2 py-0.5 bg-slate-100 rounded tracking-tight">
-                                {patient.dispensary}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-[13px] text-slate-500 whitespace-nowrap">
-                              {format(new Date(patient.dateOfAdmission), 'dd MMM yy')}
-                            </td>
-                            <td className="px-4 py-3">
-                              <StatusPill status={patient.approvalStatus} />
-                            </td>
-                            <td className="px-4 py-3 text-[13px] text-slate-600 font-bold text-center">
-                              {patient.daysApproved}
-                            </td>
-                            <td className="px-4 py-3 whitespace-nowrap">
-                              <div className={cn(
-                                "text-[13px] font-bold",
-                                patient.reApprovalNeeded ? "text-rose-700" : "text-slate-800"
-                              )}>
-                                {format(new Date(patient.extensionDate), 'dd MMM yy')}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <div className="flex items-center justify-end gap-1 opacity-100 lg:opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button 
-                                  onClick={() => handlePrintPatient(patient)}
-                                  className="p-1 px-2 border border-slate-100 text-slate-300 hover:text-hospital-primary hover:border-hospital-primary transition-all rounded bg-white shadow-sm"
-                                  title="Print Report"
-                                >
-                                  <FileText size={14} />
-                                </button>
-                                <button className="p-1 px-2 border border-slate-100 text-slate-300 hover:text-slate-600 hover:border-slate-300 transition-all rounded bg-white shadow-sm">
-                                  <MoreVertical size={14} />
-                                </button>
-                              </div>
-                            </td>
-                          </motion.tr>
-                        ))}
-                      </AnimatePresence>
-                    </tbody>
+                            </div>
+                          </td>
+                        ) : (
+                          <td className="px-4 py-3 text-[12px] text-slate-600 font-bold text-center tabular-nums">
+                            {patient.daysApproved}
+                          </td>
+                        )}
+                        <td className="px-4 py-3 whitespace-nowrap tabular-nums">
+                          <div className={cn(
+                            "text-[12px] font-bold",
+                            patient.reApprovalNeeded ? "text-rose-700" : isDueToday ? "text-amber-700 animate-pulse" : "text-slate-800"
+                          )}>
+                            {format(new Date(patient.extensionDate), 'dd MMM yy')}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-1 transition-opacity">
+                            <button 
+                              onClick={() => {
+                                setSelectedPatient(patient);
+                                setIsExtensionModalOpen(true);
+                              }}
+                              className="p-1 px-2 border border-slate-100 text-hospital-primary hover:bg-hospital-primary hover:text-white transition-all rounded bg-white shadow-sm font-bold text-[9px] uppercase tracking-tighter"
+                              title="Update Case"
+                            >
+                              Update Status
+                            </button>
+                            <button 
+                              onClick={() => handlePrintPatient(patient)}
+                              className="p-1 px-2 border border-slate-100 text-slate-300 hover:text-hospital-primary hover:border-hospital-primary transition-all rounded bg-white shadow-sm"
+                              title="Print Report"
+                            >
+                              <FileText size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </motion.tr>
+                    );
+                  })}
+                  </AnimatePresence>
+                </tbody>
                   </table>
                 </div>
 
@@ -371,16 +569,6 @@ export default function App() {
                 )}
               </div>
             </div>
-          </motion.main>
-        ) : (
-          <motion.main
-            key="admin"
-            initial={{ opacity: 0, x: 10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -10 }}
-            className="flex-1 p-6 overflow-auto"
-          >
-            <AdminPanel staff={staff} patients={patients} />
           </motion.main>
         )}
       </AnimatePresence>
@@ -427,6 +615,21 @@ export default function App() {
            ATTENTION: Some patients require immediate re-approval based on their extension dates!
         </div>
       )}
+
+      {/* Action Dialogs */}
+      <StatusActionSheet 
+        isOpen={isStatusActionSheetOpen}
+        onClose={() => setIsStatusActionSheetOpen(false)}
+        patient={selectedPatient}
+        onUpdate={handleUpdateStatus}
+      />
+
+      <CaseResolutionModal 
+        isOpen={isExtensionModalOpen}
+        onClose={() => setIsExtensionModalOpen(false)}
+        patient={selectedPatient}
+        onSave={handleCaseResolution}
+      />
     </div>
   );
 }
@@ -436,6 +639,7 @@ function StatusPill({ status }: { status: ApprovalStatus }) {
     'Approved': 'bg-emerald-100 text-emerald-700',
     'Pending': 'bg-amber-100 text-amber-700',
     'Rejected': 'bg-rose-100 text-rose-700',
+    'Discharged': 'bg-slate-100 text-slate-700',
   };
 
   return (
@@ -452,6 +656,7 @@ function PatientForm({ onSuccess, onCancel, onSave }: { onSuccess: () => void, o
   const [formData, setFormData] = useState({
     name: '',
     mobileNo: '',
+    category: 'Medical Management' as PatientCategory,
     dispensary: 'Waluj' as Dispensary,
     dateOfAdmission: format(new Date(), 'yyyy-MM-dd'),
     approvalStatus: 'Pending' as ApprovalStatus,
@@ -526,6 +731,19 @@ function PatientForm({ onSuccess, onCancel, onSave }: { onSuccess: () => void, o
           />
         </div>
         <div className="space-y-2">
+          <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Treatment Category</label>
+          <select 
+            className="w-full px-4 py-2 bg-slate-50 border border-hospital-border rounded-lg focus:ring-2 focus:ring-hospital-primary/20 outline-none text-sm font-medium"
+            value={formData.category}
+            onChange={e => setFormData(p => ({ ...p, category: e.target.value as PatientCategory }))}
+          >
+            <option value="Surgical">Surgical</option>
+            <option value="Medical Management">Medical Management</option>
+            <option value="Maternity">Maternity</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div className="space-y-2">
           <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">ESIC Dispensary</label>
           <select 
             className="w-full px-4 py-2 bg-slate-50 border border-hospital-border rounded-lg focus:ring-2 focus:ring-hospital-primary/20 outline-none text-sm font-medium"
@@ -533,10 +751,8 @@ function PatientForm({ onSuccess, onCancel, onSave }: { onSuccess: () => void, o
             onChange={e => setFormData(p => ({ ...p, dispensary: e.target.value as Dispensary }))}
           >
             <option value="Waluj">Waluj</option>
+            <option value="Waluj DCBO">Waluj DCBO</option>
             <option value="Paithan">Paithan</option>
-            <option value="Chikalthana">Chikalthana</option>
-            <option value="CIDCO">CIDCO</option>
-            <option value="Other">Other</option>
           </select>
         </div>
         <div className="space-y-2">
@@ -624,6 +840,241 @@ function PatientForm({ onSuccess, onCancel, onSave }: { onSuccess: () => void, o
         <button type="submit" className="flex-[2] py-3 px-6 bg-hospital-primary text-white text-xs font-bold rounded-lg shadow-sm shadow-sky-100 hover:bg-hospital-accent active:scale-[0.98] transition-all">Save Admission Record</button>
       </div>
     </form>
+  );
+}
+
+function StatusActionSheet({ isOpen, onClose, patient, onUpdate }: { isOpen: boolean, onClose: () => void, patient: PatientRecord | null, onUpdate: (status: ApprovalStatus) => void }) {
+  if (!patient) return null;
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+            className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[60]"
+          />
+          <motion.div 
+            initial={{ y: "100%" }}
+            animate={{ y: 0 }}
+            exit={{ y: "100%" }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="fixed bottom-0 left-0 right-0 lg:left-1/2 lg:-translate-x-1/2 lg:max-w-xl bg-white rounded-t-3xl shadow-2xl z-[70] p-6 pb-12"
+          >
+            <div className="w-12 h-1.5 bg-slate-100 rounded-full mx-auto mb-8" />
+            
+            <div className="flex items-center justify-between mb-8">
+              <div>
+                <h3 className="text-xl font-bold text-slate-900 tracking-tight">{patient.name}</h3>
+                <p className="text-sm text-slate-400 font-medium">{patient.dispensary} • Registered {format(new Date(patient.createdAt), 'dd MMM')}</p>
+              </div>
+              <button 
+                onClick={onClose}
+                className="w-10 h-10 bg-slate-50 flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4">
+              <button 
+                onClick={() => onUpdate('Approved')}
+                className="flex items-center gap-4 w-full p-5 rounded-2xl border border-emerald-100 hover:bg-emerald-50 transition-all text-left bg-white group"
+              >
+                <div className="w-12 h-12 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center group-hover:scale-110 transition-transform">
+                  <CheckCircle2 size={24} />
+                </div>
+                <div>
+                  <div className="font-bold text-emerald-900 leading-none mb-1">Approve Patient</div>
+                  <div className="text-xs text-emerald-600/70 font-medium">Validation completed and file sent for processing</div>
+                </div>
+              </button>
+
+              <button 
+                onClick={() => onUpdate('Rejected')}
+                className="flex items-center gap-4 w-full p-5 rounded-2xl border border-rose-100 hover:bg-rose-50 transition-all text-left bg-white group"
+              >
+                <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center group-hover:scale-110 transition-transform">
+                  <AlertCircle size={24} />
+                </div>
+                <div>
+                  <div className="font-bold text-rose-900 leading-none mb-1">Reject Application</div>
+                  <div className="text-xs text-rose-600/70 font-medium">Incomplete documents or ESIC mismatch</div>
+                </div>
+              </button>
+
+              <button 
+                onClick={() => onUpdate('Pending')}
+                className="flex items-center gap-4 w-full p-5 rounded-2xl border border-amber-100 hover:bg-amber-50 transition-all text-left bg-white group"
+              >
+                <div className="w-12 h-12 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center group-hover:scale-110 transition-transform">
+                  <Clock size={24} />
+                </div>
+                <div>
+                  <div className="font-bold text-amber-900 leading-none mb-1">Set to Pending</div>
+                  <div className="text-xs text-amber-600/70 font-medium">Waiting for ESIC approval or further scrutiny</div>
+                </div>
+              </button>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function CaseResolutionModal({ isOpen, onClose, patient, onSave }: { isOpen: boolean, onClose: () => void, patient: PatientRecord | null, onSave: (type: 'extension' | 'discharge', data: any) => void }) {
+  const [activeTab, setActiveTab] = useState<'extension' | 'discharge'>('extension');
+  const [formData, setFormData] = useState({
+    additionalDays: 1,
+    reason: ''
+  });
+
+  if (!patient) return null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (activeTab === 'extension') {
+      const currentExtDate = new Date(patient.extensionDate);
+      const newExtDate = addDays(currentExtDate, formData.additionalDays);
+      onSave('extension', {
+        extension: { additionalDays: formData.additionalDays, reason: formData.reason },
+        newDate: newExtDate.toISOString()
+      });
+    } else {
+      onSave('discharge', { reason: formData.reason });
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 flex items-center justify-center z-[80] p-4">
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+            className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
+          />
+          <motion.div 
+            initial={{ scale: 0.95, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.95, opacity: 0, y: 20 }}
+            className="relative w-full max-w-md bg-white rounded-3xl overflow-hidden shadow-2xl border border-hospital-border"
+          >
+            <div className="p-0 border-b border-hospital-border">
+              <div className="flex">
+                <button 
+                  type="button"
+                  onClick={() => setActiveTab('extension')}
+                  className={cn(
+                    "flex-1 py-6 flex flex-col items-center gap-2 transition-all border-b-2",
+                    activeTab === 'extension' ? "bg-white border-hospital-primary" : "bg-slate-50 border-transparent text-slate-400"
+                  )}
+                >
+                  <Plus size={20} />
+                  <span className="text-[10px] font-bold uppercase tracking-widest">Extension</span>
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => setActiveTab('discharge')}
+                  className={cn(
+                    "flex-1 py-6 flex flex-col items-center gap-2 transition-all border-b-2",
+                    activeTab === 'discharge' ? "bg-white border-rose-500 text-rose-600" : "bg-slate-50 border-transparent text-slate-400"
+                  )}
+                >
+                  <LogOut size={20} />
+                  <span className="text-[10px] font-bold uppercase tracking-widest">Discharge</span>
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleSubmit} className="p-8 space-y-6">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="bg-slate-100 p-2 rounded-xl text-slate-500">
+                  <Hospital size={16} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">{patient.name}</h3>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Case Status Update</p>
+                </div>
+              </div>
+
+              {activeTab === 'extension' && (
+                <motion.div 
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="space-y-4"
+                >
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Additional Days</label>
+                    <div className="flex items-center gap-4">
+                      <button 
+                        type="button" 
+                        onClick={() => setFormData(p => ({ ...p, additionalDays: Math.max(1, p.additionalDays - 1) }))}
+                        className="w-12 h-12 bg-slate-50 border border-hospital-border rounded-xl flex items-center justify-center text-slate-400 hover:text-hospital-primary hover:border-hospital-primary transition-all font-bold"
+                      >
+                        -
+                      </button>
+                      <input 
+                        type="number" 
+                        className="flex-1 h-12 bg-slate-50 border border-hospital-border rounded-xl text-center text-lg font-bold text-slate-900 outline-none"
+                        value={formData.additionalDays}
+                        onChange={e => setFormData(p => ({ ...p, additionalDays: parseInt(e.target.value) || 0 }))}
+                      />
+                      <button 
+                        type="button" 
+                        onClick={() => setFormData(p => ({ ...p, additionalDays: p.additionalDays + 1 }))}
+                        className="w-12 h-12 bg-slate-50 border border-hospital-border rounded-xl flex items-center justify-center text-slate-400 hover:text-hospital-primary hover:border-hospital-primary transition-all font-bold"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                  {activeTab === 'extension' ? 'Reason for extension' : 'Discharge Remarks'}
+                </label>
+                <textarea 
+                  required
+                  rows={3}
+                  className="w-full px-4 py-3 bg-slate-50 border border-hospital-border rounded-xl focus:ring-2 focus:ring-hospital-primary/20 outline-none text-sm font-medium transition-all"
+                  placeholder={activeTab === 'extension' ? "Medical grounds, ICU monitoring, etc..." : "Patient recovered, treatment completed, etc..."}
+                  value={formData.reason}
+                  onChange={e => setFormData(p => ({ ...p, reason: e.target.value }))}
+                />
+              </div>
+
+              <div className="pt-4 flex gap-3">
+                <button 
+                  type="button" 
+                  onClick={onClose}
+                  className="flex-1 py-4 text-slate-400 font-bold uppercase tracking-widest text-xs hover:text-slate-600"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  className={cn(
+                    "flex-[2] py-4 text-white rounded-2xl font-bold uppercase tracking-widest text-[10px] shadow-lg transition-all active:scale-95",
+                    activeTab === 'extension' ? "bg-hospital-primary shadow-sky-100 hover:bg-hospital-accent" : "bg-rose-500 shadow-rose-100 hover:bg-rose-600"
+                  )}
+                >
+                  {activeTab === 'extension' ? 'Submit Extension' : 'Confirm Discharge'}
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 }
 
