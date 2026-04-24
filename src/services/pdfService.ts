@@ -33,6 +33,7 @@ export const pdfService = {
       index + 1,
       p.name,
       p.category,
+      p.tlcNo || '-',
       p.dispensary,
       format(new Date(p.dateOfAdmission), 'dd/MM/yy'),
       p.approvalStatus,
@@ -44,7 +45,7 @@ export const pdfService = {
 
     (doc as any).autoTable({
       startY: 35,
-      head: [['#', 'Patient Name', 'Category', 'Dispensary', 'DOA', 'Approval', 'Days', 'Ext. Date', 'Re-Appr.', 'File Status']],
+      head: [['#', 'Patient Name', 'Category', 'TLC No', 'Dispensary', 'DOA', 'Approval', 'Days', 'Ext. Date', 'Re-Appr.', 'File Status']],
       body: tableData,
       theme: 'grid',
       headStyles: { fillColor: [40, 40, 40], textColor: [255, 255, 255] },
@@ -98,6 +99,7 @@ export const pdfService = {
       ['Mobile Number:', patient.mobileNo],
       ['Treatment Category:', patient.category],
       ['ESIC Dispensary:', patient.dispensary],
+      ['TLC No (ESIC Auth):', patient.tlcNo || 'N/A'],
       ['Date of Admission:', format(new Date(patient.dateOfAdmission), 'dd MMMM yyyy')],
       ['Approval Status:', patient.approvalStatus],
       ['Days Approved:', String(patient.daysApproved)],

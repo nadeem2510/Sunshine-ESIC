@@ -26,7 +26,11 @@ import {
   ShieldCheck,
   ChevronLeft,
   Trash2,
+  Database,
   X,
+  Search,
+  Plus,
+  Clock,
   CalendarDays,
   History,
   FileBadge,
@@ -37,16 +41,18 @@ import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, type 
 import { auth } from './services/firebase';
 import { patientService } from './services/patientService';
 import { staffService } from './services/staffService';
-import { PatientRecord, ApprovalStatus, FileStatus, Dispensary, Staff, StaffRole, PatientExtension } from './types';
+import { chatService } from './services/chatService';
+import { PatientRecord, ApprovalStatus, PatientCategory, FileStatus, Dispensary, Staff, StaffRole, PatientExtension, ChatMessage } from './types';
 import { pdfService } from './services/pdfService';
 import { excelService } from './services/excelService';
 import { cn } from './lib/utils';
 
-type AppView = 'dashboard' | 'admin' | 'extended';
+type AppView = 'dashboard' | 'admin' | 'extended' | 'submissions' | 'claims';
 
 export default function App() {
   const [patients, setPatients] = React.useState<PatientRecord[]>([]);
   const [staff, setStaff] = React.useState<Staff[]>([]);
+  const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [user, setUser] = React.useState<FirebaseUser | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -83,9 +89,14 @@ export default function App() {
       setStaff(data);
     });
 
+    const unsubMessages = chatService.subscribeToMessages((data) => {
+      setMessages(data);
+    });
+
     return () => {
       unsubPatients();
       unsubStaff();
+      unsubMessages();
     };
   }, [user]);
 
@@ -94,6 +105,21 @@ export default function App() {
     // Hardcoded bootstrapping
     if (user.email === 'nadeem2510@gmail.com') return true;
     return staff.some(s => s.email === user.email && s.role === 'admin');
+  }, [user, staff]);
+
+  const currentUser = useMemo(() => {
+    if (!user) return null;
+    const existing = staff.find(s => s.email === user.email);
+    if (existing) return existing;
+    
+    // Fallback for bootstrapped admin or first-time login
+    return {
+      id: user.uid,
+      email: user.email || '',
+      displayName: user.displayName || user.email?.split('@')[0] || 'User',
+      role: (user.email === 'nadeem2510@gmail.com' ? 'admin' : 'staff') as StaffRole,
+      createdAt: new Date().toISOString()
+    };
   }, [user, staff]);
 
   const handleLogin = async () => {
@@ -125,11 +151,22 @@ export default function App() {
           matchesDate = isWithinInterval(doa, { start, end });
         }
 
-        // View Filter (Dashboard vs Extended)
+        // View Filter (Dashboard vs Extended vs Submissions vs Claims)
         const isNotDischarged = p.approvalStatus !== 'Discharged';
-        const matchesView = currentView === 'extended' 
-          ? (isNotDischarged && p.extensions && p.extensions.length > 0) 
-          : (currentView === 'dashboard' ? isNotDischarged : true);
+        const isSubmitted = p.fileStatus === 'Final Submission to ESIC';
+        let matchesView = true;
+        
+        if (currentView === 'dashboard') {
+          matchesView = isNotDischarged;
+        } else if (currentView === 'extended') {
+          matchesView = isNotDischarged && p.extensions && p.extensions.length > 0;
+        } else if (currentView === 'submissions') {
+          matchesView = p.approvalStatus === 'Discharged' && !isSubmitted;
+        } else if (currentView === 'claims') {
+          matchesView = isSubmitted;
+        } else if (currentView === 'admin') {
+          matchesView = true;
+        }
 
         return matchesSearch && matchesDispensary && matchesDate && matchesView;
       })
@@ -152,7 +189,9 @@ export default function App() {
         return ext === today;
       }).length,
       total: patients.length,
-      discharged: patients.filter(p => p.approvalStatus === 'Discharged').length
+      discharged: patients.filter(p => p.approvalStatus === 'Discharged').length,
+      claimsPending: patients.filter(p => p.approvalStatus === 'Discharged' && p.fileStatus !== 'Final Submission to ESIC').length,
+      claimsDone: patients.filter(p => p.fileStatus === 'Final Submission to ESIC').length
     };
   }, [patients]);
 
@@ -190,6 +229,14 @@ export default function App() {
       setIsExtensionModalOpen(false);
       setSelectedPatient(null);
     }
+  };
+
+  const handleFinalSubmission = async (patientId: string) => {
+    await patientService.updatePatient(patientId, { fileStatus: 'Final Submission to ESIC' });
+  };
+
+  const handleFinalSubmission = async (patientId: string) => {
+    await patientService.updatePatient(patientId, { fileStatus: 'Final Submission to ESIC' });
   };
 
   if (loading) {
@@ -266,6 +313,26 @@ export default function App() {
               >
                 <FileBadge size={14} />
                 Extended Approvals
+              </button>
+              <button 
+                onClick={() => setCurrentView('submissions')}
+                className={cn(
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  currentView === 'submissions' ? "bg-white text-hospital-primary shadow-sm" : "text-slate-400 hover:text-slate-600"
+                )}
+              >
+                <FileBadge size={14} />
+                Final Submissions
+              </button>
+              <button 
+                onClick={() => setCurrentView('claims')}
+                className={cn(
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2",
+                  currentView === 'claims' ? "bg-white text-emerald-600 shadow-sm" : "text-slate-400 hover:text-slate-600"
+                )}
+              >
+                <CheckCircle2 size={14} />
+                Claims Submitted
               </button>
               {isAdmin && (
                 <button 
@@ -439,6 +506,45 @@ export default function App() {
 
               {/* Table Container */}
               <div className="bg-white rounded-xl border border-hospital-border shadow-sm overflow-hidden flex flex-col flex-1 min-h-0">
+                {(currentView === 'submissions' || currentView === 'claims') && (
+                  <div className={cn(
+                    "border-b px-8 py-3 flex items-center justify-between",
+                    currentView === 'submissions' ? "bg-hospital-primary/10 border-hospital-primary/20" : "bg-emerald-50 border-emerald-100"
+                  )}>
+                    <div className="flex items-center gap-4">
+                      <div className={cn(
+                        "p-2 rounded-lg text-white shadow-sm",
+                        currentView === 'submissions' ? "bg-hospital-primary" : "bg-emerald-600"
+                      )}>
+                        {currentView === 'submissions' ? <FileBadge size={18} /> : <CheckCircle2 size={18} />}
+                      </div>
+                      <div>
+                        <h4 className={cn(
+                          "text-sm font-bold",
+                          currentView === 'submissions' ? "text-hospital-primary" : "text-emerald-700"
+                        )}>
+                          {currentView === 'submissions' ? 'Final Submission Workspace' : 'Claims Processing History'}
+                        </h4>
+                        <p className="text-[10px] text-slate-500 font-medium tracking-tight">
+                          {currentView === 'submissions' 
+                            ? 'Recent discharges pending portal upload' 
+                            : 'Verified submissions waiting for ESIC payment processing'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-8">
+                      <div className="text-center">
+                        <div className="text-xs font-extrabold text-slate-900 tabular-nums">{stats.claimsPending}</div>
+                        <div className="text-[7px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5">Pending</div>
+                      </div>
+                      <div className="text-center border-l border-slate-200 pl-8">
+                        <div className="text-xs font-extrabold text-emerald-600 tabular-nums">{stats.claimsDone}</div>
+                        <div className="text-[7px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5">Success</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="overflow-auto flex-1 text-xs">
                   <table className="w-full text-left border-collapse table-fixed">
                 <thead>
@@ -447,14 +553,21 @@ export default function App() {
                     <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Mobile</th>
                     <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Category</th>
                     <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Dispensary</th>
-                    <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">DOA</th>
-                    <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Status</th>
+                    <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">TLC No</th>
+                    <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">
+                      {(currentView === 'submissions' || currentView === 'claims') ? 'Discharge' : 'DOA'}
+                    </th>
+                    <th className="w-[12%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">
+                      {(currentView === 'submissions' || currentView === 'claims') ? 'Submission' : 'Status'}
+                    </th>
                     {currentView === 'extended' ? (
                       <th className="w-[15%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-center">History</th>
                     ) : (
                       <th className="w-[8%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-center">Days</th>
                     )}
-                    <th className="w-[13%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border">Exp. Date</th>
+                    <th className="w-[13%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-center">
+                      {(currentView === 'submissions' || currentView === 'claims') ? 'Remarks' : 'Exp. Date'}
+                    </th>
                     <th className="w-[10%] font-bold text-[10px] uppercase tracking-wider text-slate-500 bg-slate-50 px-4 py-3 border-b border-hospital-border text-right">Actions</th>
                   </tr>
                 </thead>
@@ -502,11 +615,32 @@ export default function App() {
                             {patient.dispensary}
                           </span>
                         </td>
+                        <td className="px-4 py-3 font-bold text-emerald-600 tabular-nums uppercase text-[10px]">
+                          {patient.tlcNo || '-'}
+                        </td>
                         <td className="px-4 py-3 text-[12px] text-slate-500 whitespace-nowrap tabular-nums">
-                          {format(new Date(patient.dateOfAdmission), 'dd MMM yy')}
+                          {(currentView === 'submissions' || currentView === 'claims') && patient.dischargedAt 
+                            ? format(new Date(patient.dischargedAt), 'dd MMM yy') 
+                            : format(new Date(patient.dateOfAdmission), 'dd MMM yy')}
                         </td>
                         <td className="px-4 py-3">
-                          <StatusPill status={patient.approvalStatus} />
+                          {(currentView === 'submissions' || currentView === 'claims') ? (
+                            <div className="flex items-center gap-1.5">
+                              {patient.fileStatus === 'Final Submission to ESIC' ? (
+                                <div className="flex items-center gap-1 text-[9px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full uppercase tracking-tighter">
+                                  <CheckCircle2 size={10} />
+                                  Submitted
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-1 text-[9px] font-bold text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full uppercase tracking-tighter">
+                                  <Clock size={10} />
+                                  Pending Portal
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <StatusPill status={patient.approvalStatus} />
+                          )}
                         </td>
                         {currentView === 'extended' ? (
                           <td className="px-4 py-3 text-center">
@@ -524,33 +658,58 @@ export default function App() {
                             {patient.daysApproved}
                           </td>
                         )}
-                        <td className="px-4 py-3 whitespace-nowrap tabular-nums">
-                          <div className={cn(
-                            "text-[12px] font-bold",
-                            patient.reApprovalNeeded ? "text-rose-700" : isDueToday ? "text-amber-700 animate-pulse" : "text-slate-800"
-                          )}>
-                            {format(new Date(patient.extensionDate), 'dd MMM yy')}
-                          </div>
+                        <td className="px-4 py-3 whitespace-nowrap tabular-nums text-center">
+                          {(currentView === 'submissions' || currentView === 'claims') ? (
+                            <span className="text-[10px] text-slate-400 truncate max-w-[120px] block font-medium mx-auto">
+                              {patient.dischargeReason || 'N/A'}
+                            </span>
+                          ) : (
+                            <div className={cn(
+                              "text-[12px] font-bold",
+                              patient.reApprovalNeeded ? "text-rose-700" : isDueToday ? "text-amber-700 animate-pulse" : "text-slate-800"
+                            )}>
+                              {format(new Date(patient.extensionDate), 'dd MMM yy')}
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-end gap-1 transition-opacity">
-                            <button 
-                              onClick={() => {
-                                setSelectedPatient(patient);
-                                setIsExtensionModalOpen(true);
-                              }}
-                              className="p-1 px-2 border border-slate-100 text-hospital-primary hover:bg-hospital-primary hover:text-white transition-all rounded bg-white shadow-sm font-bold text-[9px] uppercase tracking-tighter"
-                              title="Update Case"
-                            >
-                              Update Status
-                            </button>
-                            <button 
-                              onClick={() => handlePrintPatient(patient)}
-                              className="p-1 px-2 border border-slate-100 text-slate-300 hover:text-hospital-primary hover:border-hospital-primary transition-all rounded bg-white shadow-sm"
-                              title="Print Report"
-                            >
-                              <FileText size={14} />
-                            </button>
+                            {currentView === 'submissions' || currentView === 'claims' ? (
+                              patient.fileStatus !== 'Final Submission to ESIC' ? (
+                                <button 
+                                  onClick={() => handleFinalSubmission(patient.id)}
+                                  className="p-1 px-3 bg-emerald-600 text-white hover:bg-emerald-700 transition-all rounded shadow-sm font-bold text-[9px] uppercase tracking-tighter flex items-center gap-1"
+                                >
+                                  <Download size={10} />
+                                  Portal Upload Done
+                                </button>
+                              ) : (
+                                <div className="text-emerald-500 flex items-center gap-1 p-1 pr-2 font-bold text-[9px] uppercase tracking-tighter">
+                                  <ShieldCheck size={14} />
+                                  Submitted
+                                </div>
+                              )
+                            ) : (
+                              <>
+                                <button 
+                                  onClick={() => {
+                                    setSelectedPatient(patient);
+                                    setIsExtensionModalOpen(true);
+                                  }}
+                                  className="p-1 px-2 border border-slate-100 text-hospital-primary hover:bg-hospital-primary hover:text-white transition-all rounded bg-white shadow-sm font-bold text-[9px] uppercase tracking-tighter"
+                                  title="Update Case"
+                                >
+                                  Update Status
+                                </button>
+                                <button 
+                                  onClick={() => handlePrintPatient(patient)}
+                                  className="p-1 px-2 border border-slate-100 text-slate-300 hover:text-hospital-primary hover:border-hospital-primary transition-all rounded bg-white shadow-sm"
+                                  title="Print Report"
+                                >
+                                  <FileText size={14} />
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </motion.tr>
@@ -630,6 +789,11 @@ export default function App() {
         patient={selectedPatient}
         onSave={handleCaseResolution}
       />
+
+      <ChatWidget 
+        messages={messages} 
+        currentUser={currentUser} 
+      />
     </div>
   );
 }
@@ -659,6 +823,7 @@ function PatientForm({ onSuccess, onCancel, onSave }: { onSuccess: () => void, o
     category: 'Medical Management' as PatientCategory,
     dispensary: 'Waluj' as Dispensary,
     dateOfAdmission: format(new Date(), 'yyyy-MM-dd'),
+    tlcNo: '',
     approvalStatus: 'Pending' as ApprovalStatus,
     daysApproved: 0,
     extensionDate: format(new Date(), 'yyyy-MM-dd'),
@@ -776,6 +941,16 @@ function PatientForm({ onSuccess, onCancel, onSave }: { onSuccess: () => void, o
             className="w-full px-4 py-2 bg-slate-50 border border-hospital-border rounded-lg focus:ring-2 focus:ring-hospital-primary/20 outline-none text-sm font-medium"
             value={formData.dateOfAdmission}
             onChange={e => setFormData(p => ({ ...p, dateOfAdmission: e.target.value }))}
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">TLC No (ESIC Auth)</label>
+          <input 
+            type="text" 
+            placeholder="Authorized TLC No"
+            className="w-full px-4 py-2 bg-slate-50 border border-hospital-border rounded-lg focus:ring-2 focus:ring-hospital-primary/20 outline-none text-sm font-medium transition-all placeholder:text-slate-300"
+            value={formData.tlcNo}
+            onChange={e => setFormData(p => ({ ...p, tlcNo: e.target.value }))}
           />
         </div>
         <div className="space-y-2">
@@ -1080,13 +1255,20 @@ function CaseResolutionModal({ isOpen, onClose, patient, onSave }: { isOpen: boo
 
 function AdminPanel({ staff, patients }: { staff: Staff[], patients: PatientRecord[] }) {
   const [isAddingStaff, setIsAddingStaff] = useState(false);
+  const [activeAdminTab, setActiveAdminTab] = useState<'team' | 'data'>('team');
+
+  const handleDeletePatient = async (id: string, name: string) => {
+    if (window.confirm(`Are you sure you want to permanently delete patient record: ${name}? This action cannot be undone.`)) {
+      await patientService.deletePatient(id);
+    }
+  };
 
   return (
     <div className="max-w-6xl mx-auto space-y-8">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Hospital Administration</h2>
-          <p className="text-sm text-slate-500 font-medium">Manage team access and system-wide reports</p>
+          <p className="text-sm text-slate-500 font-medium">Manage team access and system data</p>
         </div>
         <div className="flex gap-3">
           <button 
@@ -1096,90 +1278,212 @@ function AdminPanel({ staff, patients }: { staff: Staff[], patients: PatientReco
             <Download size={16} />
             Master Report (PDF)
           </button>
-          <button 
-            onClick={() => setIsAddingStaff(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-bold hover:bg-slate-800 transition-all shadow-sm shadow-slate-200"
+          {activeAdminTab === 'team' && (
+            <button 
+              onClick={() => setIsAddingStaff(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-bold hover:bg-slate-800 transition-all shadow-sm shadow-slate-200"
+            >
+              <Users size={16} />
+              Add Team Member
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Admin Tabs */}
+      <div className="flex gap-6 border-b border-hospital-border">
+        <button 
+          onClick={() => setActiveAdminTab('team')}
+          className={cn(
+            "pb-3 text-xs font-bold uppercase tracking-widest transition-all relative",
+            activeAdminTab === 'team' ? "text-hospital-primary" : "text-slate-400 hover:text-slate-600"
+          )}
+        >
+          Team Management
+          {activeAdminTab === 'team' && <motion.div layoutId="adminTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-hospital-primary" />}
+        </button>
+        <button 
+          onClick={() => setActiveAdminTab('data')}
+          className={cn(
+            "pb-3 text-xs font-bold uppercase tracking-widest transition-all relative",
+            activeAdminTab === 'data' ? "text-hospital-primary" : "text-slate-400 hover:text-slate-600"
+          )}
+        >
+          Data Management
+          {activeAdminTab === 'data' && <motion.div layoutId="adminTab" className="absolute bottom-0 left-0 right-0 h-0.5 bg-hospital-primary" />}
+        </button>
+      </div>
+
+      <AnimatePresence mode="wait">
+        {activeAdminTab === 'team' ? (
+          <motion.div 
+            key="team"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="grid grid-cols-3 gap-8"
           >
-            <Users size={16} />
-            Add Team Member
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-3 gap-8">
-        <div className="col-span-2 space-y-4">
-          <div className="bg-white rounded-2xl border border-hospital-border shadow-sm overflow-hidden">
-            <div className="px-6 py-4 border-b border-hospital-border bg-slate-50/50">
-              <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
-                <ShieldCheck size={16} className="text-hospital-primary" />
-                Authorized Team Members
-              </h3>
+            <div className="col-span-2 space-y-4">
+              <div className="bg-white rounded-2xl border border-hospital-border shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-hospital-border bg-slate-50/50">
+                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                    <ShieldCheck size={16} className="text-hospital-primary" />
+                    Authorized Team Members
+                  </h3>
+                </div>
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="border-b border-hospital-border">
+                      <th className="px-6 py-3 text-[10px] uppercase font-bold text-slate-400">Name</th>
+                      <th className="px-6 py-3 text-[10px] uppercase font-bold text-slate-400">Email</th>
+                      <th className="px-6 py-3 text-[10px] uppercase font-bold text-slate-400">Role</th>
+                      <th className="px-6 py-3 text-right"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {staff.map((member) => (
+                      <tr key={member.id} className="group hover:bg-slate-50/50 transition-colors">
+                        <td className="px-6 py-4 text-sm font-bold text-slate-900">{member.displayName}</td>
+                        <td className="px-6 py-4 text-sm font-medium text-slate-500">{member.email}</td>
+                        <td className="px-6 py-4 text-sm">
+                          <span className={cn(
+                            "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
+                            member.role === 'admin' ? "bg-purple-100 text-purple-700" : "bg-slate-100 text-slate-600"
+                          )}>
+                            {member.role}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button 
+                            onClick={() => staffService.deleteStaff(member.id)}
+                            className="p-1.5 text-slate-300 hover:text-rose-500 transition-colors opacity-0 group-hover:opacity-100"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <table className="w-full text-left">
-              <thead>
-                <tr className="border-b border-hospital-border">
-                  <th className="px-6 py-3 text-[10px] uppercase font-bold text-slate-400">Name</th>
-                  <th className="px-6 py-3 text-[10px] uppercase font-bold text-slate-400">Email</th>
-                  <th className="px-6 py-3 text-[10px] uppercase font-bold text-slate-400">Role</th>
-                  <th className="px-6 py-3 text-right"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-50">
-                {staff.map((member) => (
-                  <tr key={member.id} className="group hover:bg-slate-50/50 transition-colors">
-                    <td className="px-6 py-4 text-sm font-bold text-slate-900">{member.displayName}</td>
-                    <td className="px-6 py-4 text-sm font-medium text-slate-500">{member.email}</td>
-                    <td className="px-6 py-4 text-sm">
-                      <span className={cn(
-                        "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase",
-                        member.role === 'admin' ? "bg-purple-100 text-purple-700" : "bg-slate-100 text-slate-600"
-                      )}>
-                        {member.role}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <button 
-                        onClick={() => staffService.deleteStaff(member.id)}
-                        className="p-1.5 text-slate-300 hover:text-rose-500 transition-colors opacity-0 group-hover:opacity-100"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
 
-        <div className="space-y-6">
-          <div className="bg-white p-6 rounded-2xl border border-hospital-border shadow-sm">
-            <h3 className="text-sm font-bold text-slate-900 mb-4 flex items-center gap-2">
-              <FileText size={16} className="text-blue-500" />
-              Report Downloads
-            </h3>
-            <div className="space-y-2">
-              <button 
-                onClick={() => pdfService.generateDashboardReport(patients)}
-                className="w-full text-left px-4 py-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-all group"
-              >
-                <div className="text-xs font-bold text-slate-900 group-hover:text-hospital-primary transition-colors">Full Daily Grid</div>
-                <div className="text-[10px] text-slate-400 font-medium mt-1">Export all active ESIC patient status</div>
-              </button>
-              <button 
-                onClick={() => {
-                  const pending = patients.filter(p => p.approvalStatus === 'Pending');
-                  pdfService.generateDashboardReport(pending);
-                }}
-                className="w-full text-left px-4 py-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-all group"
-              >
-                <div className="text-xs font-bold text-slate-900 group-hover:text-amber-600 transition-colors">Pending Only</div>
-                <div className="text-[10px] text-slate-400 font-medium mt-1">Export only records awaiting ESIC approval</div>
-              </button>
+            <div className="space-y-6">
+              <div className="bg-white p-6 rounded-2xl border border-hospital-border shadow-sm">
+                <h3 className="text-sm font-bold text-slate-900 mb-4 flex items-center gap-2">
+                  <FileText size={16} className="text-blue-500" />
+                  Report Downloads
+                </h3>
+                <div className="space-y-2">
+                  <button 
+                    onClick={() => pdfService.generateDashboardReport(patients)}
+                    className="w-full text-left px-4 py-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-all group"
+                  >
+                    <div className="text-xs font-bold text-slate-900 group-hover:text-hospital-primary transition-colors">Full Daily Grid</div>
+                    <div className="text-[10px] text-slate-400 font-medium mt-1">Export all active ESIC patient status</div>
+                  </button>
+                  <button 
+                    onClick={() => {
+                      const pending = patients.filter(p => p.approvalStatus === 'Pending');
+                      pdfService.generateDashboardReport(pending);
+                    }}
+                    className="w-full text-left px-4 py-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition-all group"
+                  >
+                    <div className="text-xs font-bold text-slate-900 group-hover:text-amber-600 transition-colors">Pending Only</div>
+                    <div className="text-[10px] text-slate-400 font-medium mt-1">Export only records awaiting ESIC approval</div>
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-      </div>
+          </motion.div>
+        ) : (
+          <motion.div 
+            key="data"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="space-y-4"
+          >
+            <div className="bg-white rounded-2xl border border-hospital-border shadow-sm overflow-hidden flex flex-col max-h-[600px]">
+              <div className="px-6 py-4 border-b border-hospital-border bg-slate-50/50 flex justify-between items-center shrink-0">
+                <div className="flex items-center gap-4">
+                  <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2">
+                    <Database size={16} className="text-indigo-500" />
+                    Master Database Records
+                  </h3>
+                  <div className="relative">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input 
+                      type="text"
+                      placeholder="Search patient record..."
+                      className="pl-8 pr-4 py-1.5 bg-white border border-hospital-border rounded-lg text-xs outline-none focus:ring-2 focus:ring-hospital-primary/20 w-64"
+                      onChange={(e) => {
+                        const term = e.target.value.toLowerCase();
+                        const rows = document.querySelectorAll('.data-record-row');
+                        rows.forEach(row => {
+                          const text = row.textContent?.toLowerCase() || '';
+                          (row as HTMLElement).style.display = text.includes(term) ? '' : 'none';
+                        });
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                  Total Records: {patients.length}
+                </div>
+              </div>
+              <div className="overflow-auto flex-1">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50/30 border-b border-hospital-border sticky top-0 z-10">
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Patient</th>
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Mobile</th>
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Category</th>
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Dispensary</th>
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Admission</th>
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">TLC No</th>
+                      <th className="px-6 py-3 font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Status</th>
+                      <th className="px-6 py-3 text-right font-bold text-slate-500 bg-slate-50/95 backdrop-blur-sm">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {patients.map((patient) => (
+                      <tr key={patient.id} className="data-record-row hover:bg-slate-50/50 transition-colors">
+                        <td className="px-6 py-4 font-bold text-slate-900">{patient.name}</td>
+                        <td className="px-6 py-4 font-medium text-slate-600">{patient.mobileNo}</td>
+                        <td className="px-6 py-4">
+                          <span className="px-2 py-0.5 bg-sky-50 text-hospital-primary rounded text-[10px] font-bold">
+                            {patient.category}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 font-medium text-slate-500">{patient.dispensary}</td>
+                        <td className="px-6 py-4 tabular-nums text-slate-500">
+                          {format(new Date(patient.dateOfAdmission), 'dd/MM/yyyy')}
+                        </td>
+                        <td className="px-6 py-4 font-bold text-emerald-600 tabular-nums">
+                          {patient.tlcNo || '-'}
+                        </td>
+                        <td className="px-6 py-4">
+                          <StatusPill status={patient.approvalStatus} />
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button 
+                            onClick={() => handleDeletePatient(patient.id, patient.name)}
+                            className="p-2 text-rose-300 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
+                            title="Delete Record"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {isAddingStaff && (
@@ -1266,5 +1570,141 @@ function StaffForm({ onCancel, onSuccess }: { onCancel: () => void, onSuccess: (
         <button type="submit" className="flex-[2] py-2 bg-slate-900 text-white text-xs font-bold rounded-lg shadow-sm leading-none">Add Member</button>
       </div>
     </form>
+  );
+}
+
+function ChatWidget({ messages, currentUser }: { messages: ChatMessage[], currentUser: Staff | null }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [text, setText] = useState('');
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, isOpen]);
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!text.trim() || !currentUser || !auth.currentUser) return;
+
+    await chatService.sendMessage({
+      senderId: auth.currentUser.uid,
+      senderName: currentUser.displayName,
+      senderRole: currentUser.role,
+      text: text.trim(),
+    });
+    setText('');
+  };
+
+  return (
+    <div className="fixed bottom-6 right-6 z-[100]">
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div 
+            initial={{ opacity: 0, y: 20, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            className="absolute bottom-16 right-0 w-80 h-96 bg-white rounded-2xl shadow-2xl border border-hospital-border flex flex-col overflow-hidden"
+          >
+            <div className="px-4 py-3 bg-hospital-primary text-white flex items-center justify-between shadow-sm shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-white/20 rounded-lg">
+                  <Hospital size={16} />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wider">Internal Team Chat</h3>
+                  <p className="text-[10px] opacity-70">Common space</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsOpen(false)}
+                className="p-1 hover:bg-white/10 rounded-full transition-colors"
+                title="Close Chat"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div 
+              ref={scrollRef}
+              className="flex-1 overflow-auto p-4 space-y-4 bg-slate-50/50"
+            >
+              {messages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-300 space-y-2">
+                  <Clock size={24} className="opacity-20" />
+                  <p className="text-[10px] font-bold uppercase tracking-widest">No messages yet</p>
+                </div>
+              ) : (
+                messages.map((msg) => {
+                  const isMine = msg.senderId === auth.currentUser?.uid;
+                  return (
+                    <div key={msg.id} className={cn(
+                      "flex flex-col gap-1",
+                      isMine ? "items-end" : "items-start"
+                    )}>
+                      <div className="flex items-center gap-1.5 px-1">
+                        {!isMine && (
+                          <span className="text-[9px] font-bold text-hospital-primary truncate max-w-[100px]">
+                            {msg.senderName}
+                          </span>
+                        )}
+                        <span className="text-[8px] text-slate-400">
+                          {format(new Date(msg.createdAt), 'HH:mm')}
+                        </span>
+                      </div>
+                      <div className={cn(
+                        "px-3 py-2 rounded-2xl text-[12px] max-w-[85%] shadow-sm",
+                        isMine 
+                          ? "bg-hospital-primary text-white rounded-tr-none" 
+                          : "bg-white text-slate-700 border border-slate-100 rounded-tl-none"
+                      )}>
+                        {msg.text}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <form onSubmit={handleSend} className="p-3 bg-white border-t border-slate-100 shrink-0">
+              <div className="relative">
+                <input 
+                  type="text" 
+                  placeholder="Type a message..."
+                  className="w-full pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-100 rounded-xl text-xs outline-none focus:ring-2 focus:ring-hospital-primary/20 transition-all font-medium"
+                  value={text}
+                  onChange={e => setText(e.target.value)}
+                />
+                <button 
+                  type="submit"
+                  disabled={!text.trim()}
+                  className="absolute right-1 top-1 w-8 h-8 flex items-center justify-center bg-hospital-primary text-white rounded-lg hover:bg-hospital-accent transition-all disabled:opacity-30 disabled:grayscale"
+                >
+                  <Plus size={14} className="rotate-45" />
+                </button>
+              </div>
+            </form>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <button 
+        onClick={() => setIsOpen(!isOpen)}
+        className={cn(
+          "w-14 h-14 rounded-full flex items-center justify-center shadow-xl transition-all active:scale-95 group",
+          isOpen ? "bg-white text-hospital-primary border border-hospital-border" : "bg-hospital-primary text-white hover:bg-hospital-accent"
+        )}
+      >
+        {isOpen ? (
+          <X size={24} />
+        ) : (
+          <div className="relative">
+            <Plus size={24} className="transition-transform group-hover:rotate-90" />
+            <div className="absolute top-0 right-0 w-2.5 h-2.5 bg-rose-500 border-2 border-hospital-primary rounded-full" />
+          </div>
+        )}
+      </button>
+    </div>
   );
 }

@@ -8,6 +8,7 @@ class ExcelService {
       'Patient Name': p.name,
       'Mobile No': p.mobileNo,
       'Category': p.category,
+      'TLC No': p.tlcNo || '-',
       'Dispensary': p.dispensary,
       'Date of Admission': format(new Date(p.dateOfAdmission), 'dd/MM/yyyy'),
       'Days Approved': p.daysApproved,

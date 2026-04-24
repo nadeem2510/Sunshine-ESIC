@@ -10,6 +10,7 @@
         "mobileNo": { "type": "string", "pattern": "^[0-9]{10}$" },
         "dispensary": { "type": "string", "enum": ["Waluj", "Waluj DCBO", "Paithan"] },
         "dateOfAdmission": { "type": "string", "format": "date-time" },
+        "tlcNo": { "type": "string", "description": "Authorization number from ESIC" },
         "approvalStatus": { "type": "string", "enum": ["Pending", "Approved", "Rejected"] },
         "daysApproved": { "type": "number" },
         "extensionDate": { "type": "string", "format": "date-time" },
@@ -42,6 +43,19 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["email", "role"]
+    },
+    "ChatMessage": {
+      "title": "Internal Message",
+      "description": "Internal communication message between staff members",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderRole": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId", "senderName", "text"]
     }
   },
   "firestore": {
@@ -52,6 +66,10 @@
     "staff": {
       "schema": "Staff",
       "description": "Collection of authorized hospital staff"
+    },
+    "messages": {
+      "schema": "ChatMessage",
+      "description": "Internal common chat messages"
     }
   }
 }

@@ -37,11 +37,12 @@ service cloud.firestore {
 
     // Patient Validation helper
     function isValidPatient(data) {
-      return data.keys().hasAll(['name', 'mobileNo', 'dispensary', 'dateOfAdmission', 'approvalStatus', 'fileStatus', 'createdAt', 'updatedAt'])
+      return data.keys().hasAll(['name', 'mobileNo', 'category', 'dispensary', 'dateOfAdmission', 'approvalStatus', 'fileStatus', 'createdAt', 'updatedAt'])
         && data.name is string && data.name.size() > 0 && data.name.size() <= 200
         && data.mobileNo is string && data.mobileNo.matches('^[0-9]{10}$')
-        && data.dispensary in ['Waluj', 'Paithan', 'Chikalthana', 'CIDCO', 'Other']
-        && data.approvalStatus in ['Pending', 'Approved', 'Rejected']
+        && data.category in ['Surgical', 'Medical Management', 'Maternity', 'Other']
+        && data.dispensary in ['Waluj', 'Waluj DCBO', 'Paithan']
+        && data.approvalStatus in ['Pending', 'Approved', 'Rejected', 'Discharged']
         && data.fileStatus in ['Initial Stage', 'Documentation Pending', 'File Completed', 'Final Submission to ESIC']
         && data.dateOfAdmission is string // ISO format
         && (data.daysApproved is number || data.daysApproved == null)
@@ -63,17 +64,27 @@ service cloud.firestore {
       allow update: if isSignedIn()
         && isValidPatient(incoming())
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'mobileNo', 'dispensary', 'dateOfAdmission', 
-          'approvalStatus', 'daysApproved', 'extensionDate', 
-          'reApprovalNeeded', 'fileStatus', 'updatedAt'
+          'name', 'mobileNo', 'category', 'dispensary', 'dateOfAdmission', 
+          'approvalStatus', 'daysApproved', 'extensionDate', 'extensions',
+          'reApprovalNeeded', 'fileStatus', 'updatedAt', 'isDischarged', 'dischargedAt', 'dischargeReason'
         ]);
         
-      allow delete: if isSignedIn(); // Allow deletion for demo/internal cleanup
+      allow delete: if isSignedIn(); // Allow deletion for internal cleanup
     }
 
     match /staff/{staffId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
+    }
+
+    match /messages/{messageId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && incoming().senderId == request.auth.uid
+        && incoming().text is string
+        && incoming().text.size() > 0
+        && incoming().text.size() <= 1000
+        && incoming().createdAt == request.time;
     }
   }
 }

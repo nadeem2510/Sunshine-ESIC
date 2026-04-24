@@ -27,6 +27,7 @@ export interface PatientRecord {
   category: PatientCategory;
   dispensary: Dispensary;
   dateOfAdmission: string; // ISO string
+  tlcNo?: string; // Authorized by ESIC
   approvalStatus: ApprovalStatus;
   daysApproved: number;
   extensionDate: string; // ISO string, auto-calculated but editable
@@ -47,6 +48,15 @@ export interface Staff {
   email: string;
   displayName: string;
   role: StaffRole;
+  createdAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  senderRole: StaffRole;
+  text: string;
   createdAt: string;
 }
 
